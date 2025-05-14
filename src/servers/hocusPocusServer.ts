@@ -5,10 +5,18 @@ import { fetchDocument } from '@/api/getDoc';
 import { getMe } from '@/api/getMe';
 import { logger } from '@/utils';
 
+// Startup check: warn if not in production mode
+if (process.env.NODE_ENV !== 'production') {
+  logger('[SECURITY WARNING] Authentication is bypassed because NODE_ENV is not set to "production". Do not use this mode in production!');
+}
+
+const corsOrigin = process.env.CORS_ORIGIN || "*";
+
 export const hocusPocusServer = Server.configure({
   name: 'docs-collaboration',
   timeout: 30000,
   quiet: true,
+
   async onConnect({
     requestHeaders,
     connection,
@@ -17,7 +25,37 @@ export const hocusPocusServer = Server.configure({
     context,
     request,
   }) {
+    // Mask sensitive headers before logging
+    const { authorization, cookie, ...safeHeaders } = requestHeaders;
+    logger('Attempted connection:', {
+      documentName,
+      headers: safeHeaders,
+      url: request?.url,
+      remoteAddress: request?.socket?.remoteAddress,
+    });
     const roomParam = requestParameters.get('room');
+
+    // Allow all connections in local development (no cookie required)
+    if (process.env.NODE_ENV !== "production") {
+      logger("Bypass hit! Local dev: allowing anonymous connection to room:", documentName);
+      connection.readOnly = false;
+      context.userId = "dev-user";
+      return Promise.resolve();
+    }
+
+    // Only run authentication in production
+    if (process.env.NODE_ENV === "production") {
+      try {
+        const user = await getMe(requestHeaders);
+        context.userId = user.id;
+      } catch (err) {
+        logger('onConnect: backend error', err);
+        return Promise.reject(new Error('Backend error: Unauthorized'));
+      }
+    } else {
+      // For extra safety, allow in dev
+      context.userId = "dev-user";
+    }
 
     if (documentName !== roomParam) {
       logger(
@@ -69,14 +107,16 @@ export const hocusPocusServer = Server.configure({
       const user = await getMe(requestHeaders);
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       context.userId = user.id;
-    } catch {}
+    } catch (err) {
+      logger('onConnect: silent getMe error', err instanceof Error ? err.message : err);
+    }
 
-    logger(
-      'Connection established on room:',
-      documentName,
-      'canEdit:',
-      can_edit,
-    );
+    logger('Connection established', {
+      room: documentName,
+      userId: context.userId,
+      canEdit: can_edit,
+      remoteAddress: request?.socket?.remoteAddress,
+    });
     return Promise.resolve();
   },
 });
